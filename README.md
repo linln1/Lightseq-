@@ -469,13 +469,62 @@ layer a与layer b 计算方法相同
 
 ​	
 
-### 同理，self-atten正向传播中
+### 同理，正向传播中
 
 - 需要保存的就是，Y, Z, K, Q, V, in, S, ~K, ~Q, ~V 也需要**9 * B * L * H + B * L^2 * N**
 
 
 
 所以临时变量大小   **2 * ( **9 * B * L * H + B * L^2 * N )
+
+
+
+综上，总结到一起
+
+```
+B = 1
+L = 8836
+H = 1152 
+N = 9 
+I = intermediate_size = 2*H = 2*1152 = 2304
+bool pre_or_postLayerNorm = true
+
+// 
+9 * H + 4 * H * H + 2 * H * I + I
+// 
+B* H  + B * N * L + 2 * B + B * H + B * I + 2 * B
+// 
+2 * ( 9 * B * L * H + B * L * L * N )
+
+对于26个 layer A 
+	总共需要 26 * (10368 + 5308416 + 5308416 + 2304 + 1152 + 79524 + 1152 + 2304 + 2 + 183223296 + 140500000) = 8695360284
+	大概8.7 * 2^30
+    8.7 * sizeof(T) GB 数据
+    
+    
+同理，对于26个B
+B = 1 
+L = 4418 
+H = 576 
+N = 18 
+intermediate_size = 5*hidden_size = 2880
+
+	19583625776 = 19.58 * 2^30
+	需要 19.58 * sizeof(T) GB 数据
+	
+加到一起，需要28.279999999999998 * sizeof(T) GB数据
+
+    half数据类型用16位来表示浮点数，就是2字节，sizeof(half)=2
+    需要56.56GB数据
+
+	float数据类型32位，sizeof(float)=4
+	需要113.12GB数据
+	
+```
+
+
+
+
 
 
 
@@ -508,7 +557,6 @@ layer a与layer b 计算方法相同
   - 为了避免临时内存的频繁分配，对训练集进行扫描并估计其容量的上界。因此，在训练开始前分配一次大小最大的临时内存，并对不同批次进行重复使用，在训练结束后释放。具体方式就是第二问提到的。
 
   
-
 
 [ref] LightSeq: Accelerated Training for Transformer-based Models on GPUs
 
