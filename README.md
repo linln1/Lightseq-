@@ -132,9 +132,9 @@
 
 - 然后看下分为几种类别
 
-  - ![image-20211013005016726](encoderlayer.assets/image-20211013005016726.png)
+  - ![image-20211013005016726](README.assets/image-20211013005016726.png)
 
-  - ![image-20211013005047687](encoderlayer.assets/image-20211013005047687.png)
+  - ![image-20211013005047687](README.assets/image-20211013005047687.png)
 
     
   
@@ -192,7 +192,7 @@
 
 ## 2. 分析任务中的52个Layer，运⾏起来⼤概会占⽤多少显存？
 
-![image-20211013020206923](encoderlayer.assets/image-20211013020206923.png)
+![image-20211013020206923](README.assets/image-20211013020206923.png)
 
 layer a与layer b 计算方法相同
 
@@ -213,7 +213,7 @@ layer a与layer b 计算方法相同
 	H = H
 	max_seq_len = L
 	heads = N
-	
+
 
 - ```
   
@@ -250,7 +250,7 @@ layer a与layer b 计算方法相同
 
 - 前向传播中
 
-  - ![image-20211014212129197](encoderlayer.assets/image-20211014212129197.png)
+  - ![image-20211014212129197](README.assets/image-20211014212129197.png)
   - 每一个TransformerEncoderLayer可以划分为这些子层，在运算过程中会产生一些显存占用
   - 
 
@@ -258,11 +258,11 @@ layer a与layer b 计算方法相同
 
   - lightseq论文作者发现，transformer在训练和推理过程中，pytorch、tensorflow版代码gpu会频繁地释放和申请显存空间，导致gpu的显存利用率出现波动，如图：
 
-    ![image-20211014205805248](encoderlayer.assets/image-20211014205805248.png)
+    ![image-20211014205805248](README.assets/image-20211014205805248.png)
 
     ​	所以lightseq针对此做了一些改进，在训练之前，预先估计gpu显存峰值大小，固定分配这么大的显存，然后就节约了训练过程中显存的动态申请和释放开销，举例来说，就是反向梯度传播中，同一列的数值可以共享显存，总共的显存占用就是3BLH + max{BLLN, 3BLN}
 
-    ![image-20211014205950825](encoderlayer.assets/image-20211014205950825.png)
+    ![image-20211014205950825](README.assets/image-20211014205950825.png)
 
     
 
