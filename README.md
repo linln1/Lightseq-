@@ -150,7 +150,7 @@
   - - ```
       为了便于查看，我们做如下约定
       max_batch_tokens = B
-      H = H
+      nhead = H
       max_seq_len = L
       heads = N
       ```
@@ -245,7 +245,7 @@ layer a与layer b 计算方法相同
 
 	为了便于查看，我们做如下约定
 	max_batch_tokens = B
-	H = H
+	nhead = H
 	max_seq_len = L
 	heads = N
 
@@ -343,7 +343,7 @@ layer a与layer b 计算方法相同
     
       - **▽**Y, **▽**Z, **▽**K, **▽**Q, **▽**V, **▽**in 大小都是 B * L * H
       - ▽S 大小是 3 * B * L * H
-      - ▽~K + ▽~Q + ▽~V 大小是 B * L^2 * N
+      - ▽ ~K + ▽ ~Q + ▽~V 大小是 B * L^2 * N
     
       则总共需要**9 * B * L * H + B * L^2 * N**字节的临时内存。
 
