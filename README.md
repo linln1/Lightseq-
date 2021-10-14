@@ -251,6 +251,7 @@ layer a与layer b 计算方法相同
 
 
 - ```
+  运算之前，就需要分配好的变量
   
   - qkv_ptr= 3 * B * H
   
@@ -267,15 +268,13 @@ layer a与layer b 计算方法相同
   - ff2_inp_ptr = B * intermediate_size
   
   - smem_size = max(3 * B * H + B * _intermediate_size, 5 * B * H + std::max(3 * B * H,  B * N * L))
-  
+  其中smem_size是gpu中的全局共享内存，就是一些前后顺序上互相不依赖的tensor，可以共享显存。
   
   ```
 
-​    其中smem_size是gpu中的全局共享内存，就是一些前后顺序上互相不依赖的tensor，可以共享显存。
+​    加到一起  
 
-
-
-## 2.3 计算过程中可能存在的临时变量
+​	5B * H + 2B * N * L + 2B * intermediate_size + max(3 * B * H + B * intermediate_size,   5 * B * H + max(3 * B * H, B * N * L))
 
 - 前向传播中
 
@@ -315,37 +314,168 @@ layer a与layer b 计算方法相同
     	  }
     ```
 
-  - 
+  - 细看Forward函数
 
-- 向传播中
+    ![image-20211014225822920](README.assets/image-20211014225822920.png)
 
-  - lightseq论文作者发现，transformer在训练和推理过程中，pytorch、tensorflow版代码gpu会频繁地释放和申请显存空间，导致gpu的显存利用率出现波动，如图：
+    ```
+    attn_buffer 指针指向已经分配好的临时内存，所以attn_buffer只占8字节
+    同理，ffn_inp_ptr也一样，总共占16字节
+    ```
 
-    ![image-20211014205805248](README.assets/image-20211014205805248.png)
+    - 第一步是self-attention
 
-    ​	所以lightseq针对此做了一些改进，在训练之前，预先估计gpu显存峰值大小，固定分配这么大的显存，然后就节约了训练过程中显存的动态申请和释放开销，举例来说，就是反向梯度传播中，同一列的数值可以共享显存，总共的显存占用就是3BLH + max{BLLN, 3BLN}
+    ```C
+    大概流程如下，
+    【1】定义了一个指针，这个指针指向__qkv_ptr 这个显存已经计算过，所以这里只需要三个指针大小的显存，8*3 = 24字节
+      T *q_tf_ptr = _qkv_ptr;
+      T *k_tf_ptr = q_tf_ptr + _batch_dim;
+      T *v_tf_ptr = k_tf_ptr + _batch_dim;
+    
+    【2】是否先进行layerNorm，如果先进行，执行第一句， _attn_ln_层对应LayerNorm操作，也有可能最后执行，总之需要正则化一次，需要显存
+    ```
 
-    ![image-20211014205950825](README.assets/image-20211014205950825.png)
+    ![image-20211014224201515](README.assets/image-20211014224911279.png)
+
+    ![image-20211014224956693](README.assets/image-20211014224956693.png)
+
+    需要显存大小 B 或者 2B
+
+    ```
+    
+    【3】接着对上一步的数据进行_qkv_linear操作，这里的操纵不需要临时显存
+    
+    【4】添加Bias 然后Reshape Q，K，V
+    
+    【5】_attn_scores， Q*K， 这里也不需要临时显存
+    
+    【6】_softmax, 不需要临时显存
+    
+    【7】_attn_prob_dropout， 需要临时显存，得到score
+    ```
+
+    ![image-20211014224236300](README.assets/image-20211014224236300.png)
+
+    大小为 B * N * L
+
+    ```
+    【8】_attn_context score和V注意力乘， 不需要额外显存
+    
+    【9】reshape，不需要额外显存
+    
+    【10】输出前进行线性变换，_attn_out_linear，不需要额外显存
+    
+    【11】_attn_dropout，需要显存
+    ```
+
+    ![image-20211014224644723](README.assets/image-20211014224644723.png)
+
+    大小为 B * H
+
+    - 第二步是ffn
+
+      ```
+      【1】 第一步或者最后一步LayerNorm，需要参数
+      ```
+
+      ![image-20211014225315762](README.assets/image-20211014225315762.png)
+
+      需要显存大小 B 或者 2B
+
+      ```
+      【2】 _ff1，无需显存
+      
+      【3】 _activation_ffn_dropout, 需要显存
+      ```
+
+      ![image-20211014225521406](README.assets/image-20211014225521406.png)
+
+      大小为 B * intermediate_size
+
+      ```
+      【4】 _ff2, 无需显存
+      
+      【5】_ffn_dropout，需要
+      ```
+
+      ![image-20211014225649013](README.assets/image-20211014225649013.png)
+
+      大小为 B * H
+
+      总共加起来  2B + B * N * L + B * H + 2B + B * intermediate_size +  B * H
 
     
 
-    - 右边部分的图的每一行列出了一步中**临时张量**的内存占用情况。
-    
-    - 同一列中的张量重用同一内存块。
-    
-    - 橙色张量和紫色张量的大小分别为BLH和BLLN。
-    
-    - 虚线内存块中的张量不会在这个步骤中更新，而实心内存块中的张量会更新。
-    
-    - 我们可以看到，只需要3BHL(前三个块)+ max{3BHL, BNL^2}(最后一个块)的内存字节.
-    
-    - 相反，如果不使用共享内存块策略，
-    
-      - **▽**Y, **▽**Z, **▽**K, **▽**Q, **▽**V, **▽**in 大小都是 B * L * H
-      - ▽S 大小是 3 * B * L * H
-      - ▽ ~K + ▽ ~Q + ▽~V 大小是 B * L^2 * N
-    
-      则总共需要**9 * B * L * H + B * L^2 * N**字节的临时内存。
+- 反向传播中
+
+  可以同理分析
+
+  ![image-20211014230030365](README.assets/image-20211014230030365.png)
+
+  需要临时现存的有
+
+  ![image-20211014230449741](README.assets/image-20211014230449741.png)
+
+  ![image-20211014230712350](README.assets/image-20211014230712350.png)
+
+  ![image-20211014230803925](README.assets/image-20211014230803925.png)
+
+  ![image-20211014230825468](README.assets/image-20211014230825468.png)
+
+  ![image-20211014230848755](README.assets/image-20211014230848755.png)
+
+  ![image-20211014230927096](README.assets/image-20211014230927096.png)
+
+  总共加起来
+
+  ​		B* H  + B \*N* L + 2B + B\* H + B * intermediate_size + 2B
+
+## 2.3 计算过程中存在的临时变量
+
+### 反向传播中：
+
+- lightseq论文作者发现，transformer在训练和推理过程中，pytorch、tensorflow版代码gpu会频繁地释放和申请显存空间，导致gpu的显存利用率出现波动，如图：
+
+  ![image-20211014205805248](README.assets/image-20211014205805248.png)
+
+  ​	所以lightseq针对此做了一些改进，在训练之前，预先估计gpu显存峰值大小，固定分配这么大的显存，然后就节约了训练过程中显存的动态申请和释放开销，举例来说，就是反向梯度传播中，同一列的数值可以共享显存，总共的显存占用就是3BLH + max{BLLN, 3BLN}
+
+  ![image-20211014205950825](README.assets/image-20211014205950825.png)
+
+  
+
+  - 右边部分的图的每一行列出了一步中**临时张量**的内存占用情况。
+  
+  - 同一列中的张量重用同一内存块。
+  
+  - 橙色张量和紫色张量的大小分别为BLH和BLLN。
+  
+  - 虚线内存块中的张量不会在这个步骤中更新，而实心内存块中的张量会更新。
+  
+  - 我们可以看到，只需要**3BHL(前三个块)+ max{3BHL, BNL^2}** (最后一个块)的内存字节.
+  
+  - 相反，如果不使用共享内存块策略，
+  
+    - **▽**Y, **▽**Z, **▽**K, **▽**Q, **▽**V, **▽**in 大小都是 B * L * H
+    - ▽S 大小是 3 * B * L * H
+    - ▽ ~K + ▽ ~Q + ▽~V 大小是 B * L^2 * N
+  
+    则总共需要**9 * B * L * H + B * L^2 * N**字节的临时内存。
+  
+- 在ffn的反向传播中，需要的临时变量如图
+
+  - <img src="README.assets/image-20211014233059500.png" alt="image-20211014233059500" style="zoom:50%;" />
+  - 只需要 B * L * H ，而且其实和self-atten里面的还可以共享，所以这 B * L * H 也可以忽略
+
+​	
+
+### 同理，self-atten正向传播中
+
+- 需要保存的就是，Y, Z, K, Q, V, in, S, ~K, ~Q, ~V 也需要**9 * B * L * H + B * L^2 * N**
+
+
+
+所以临时变量大小   **2 * ( **9 * B * L * H + B * L^2 * N )
 
 
 
