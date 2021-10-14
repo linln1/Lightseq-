@@ -138,56 +138,47 @@
 
     
   
-  - 
-  
 - 接着来看，什么是中间值，就是指运行过程中会动态分配内存的量
 
-  - 中间值也就是
+  - **中间值**也就是
 
     - allocate_mem_buffer()
     - free_mem_buffer()
 
     中涉及到的变量指针
 
-  - - 具体来看，内存中分配空间大小如下
-
+  - - ```
+      为了便于查看，我们做如下约定
+      max_batch_tokens = B
+      H = H
+      max_seq_len = L
+      heads = N
+      ```
+      
+    - 具体来看，内存中分配空间大小如下
+    
       - ```
-        _gemmQKV_inp_ptr:   _max_batch_tokens * _H 
-        				  = _max_batch_size * _max_seq_len * _H
+        _gemmQKV_inp_ptr:   B * H 
         
-        _qkv_ptr: _max_batch_tokens * _H * 3 【用来生成KVQ矩阵】
+        _qkv_ptr: B * H * 3 【用来生成KVQ矩阵】
         
-        _soft_out_ptr: _max_batch_tokens * _heads * _max_seq_len 									用在【soft(KQ/sqrt(d_k))】
+        _soft_out_ptr: B * N * L 	用在【soft(KQ/sqrt(d_k))】
         
-        _ctx_bufB_ptr: _max_batch_tokens * _heads * _max_seq_len
+        _ctx_bufB_ptr: B * N * L
         
-        _attn_o_inp_ptr = _max_batch_tokens * _H
+        _attn_o_inp_ptr = B * H
         
-        _ff1_inp_ptr = _max_batch_tokens * _H
+        _ff1_inp_ptr = B * H
         
-        _relu_inp_ptr = _max_batch_tokens * _intermediate_size
+        _relu_inp_ptr = B * _intermediate_size
         
-        _ff2_inp_ptr = _max_batch_tokens * _intermediate_size
+        _ff2_inp_ptr = B * _intermediate_size
         ```
-
+        
       - 如果层与层之间要共享gpu内存，就需要给__shared_mem_ptr分配空间smem_size
-
+      
         - ```
-          
-          // buffer size needed by ffn bw
-          size_t sz_ffn_bw = 3 * _max_batch_tokens * _H +
-                                 _max_batch_tokens * _intermediate_size;
-          
-          
-          
-          // buffer size needed by attn bw
-          size_t sz_attn_bw = 5 * _max_batch_tokens * _H +
-                                  std::max(3 * _max_batch_tokens * _H,
-                                           _max_batch_tokens * _heads * _max_seq_len);
-                                           
-                                           
-              
-          size_t smem_size = std::max(sz_ffn_bw, sz_attn_bw);
+          - smem_size = max(3 * B * H + B * _intermediate_size, 5 * B * H + std::max(3 * B * H,  B * N * L))
           ```
 
 ## 2. 分析任务中的52个Layer，运⾏起来⼤概会占⽤多少显存？
@@ -196,17 +187,61 @@
 
 layer a与layer b 计算方法相同
 
-显存占用就是   
+显存占用就是  ：
 
-- cuda_malloc中分配的量
-- 计算过程中可能存在的临时变量
+- 固定大小的永久内存, 如：\__device__修饰的量、 \__global__修饰量 ，这里没有找到，也可忽略。
+- 存储参数及其梯度
+- 可变大小的临时内存来存储中间状态
+  - 包括cuda_malloc分配的量
+  - TransformerEncoderLayer中运算过程中申请的中间占用
 
--  \__device__修饰的量
--  \__global__修饰量 
+
+
+## 2.1 存储参数以及梯度
+
+- assign_weight_ptr() 函数以及 assign_grad_ptr()函数传入的指针指向的显存，前者指向权重参数，后者指向梯度参数
+
+  ```C
+      const T *wptr = weights_ptr;
+      // assign weights ptr
+      _attn_qkvw_ptr = wptr;
+      wptr += _hidden_size * _hidden_size * 3;
+      _attn_qkvb_ptr = wptr;
+      wptr += _hidden_size * 3;
+      _attn_ow_ptr = wptr;
+      wptr += _hidden_size * _hidden_size;
+      _attn_ob_ptr = wptr;
+      wptr += _hidden_size;
+      _attn_nw_ptr = wptr;
+      wptr += _hidden_size;
+      _attn_nb_ptr = wptr;
+      wptr += _hidden_size;
+  
+      _inter_w_ptr = wptr;
+      wptr += _hidden_size * _intermediate_size;
+      _inter_b_ptr = wptr;
+      wptr += _intermediate_size;
+      _output_w_ptr = wptr;
+      wptr += _hidden_size * _intermediate_size;
+      _output_b_ptr = wptr;
+      wptr += _hidden_size;
+      _ffn_nw_ptr = wptr;
+      wptr += _hidden_size;
+      _ffn_nb_ptr = wptr;
+      wptr += _hidden_size;
+  ```
+
+  - ```
+    - wptr = gptr 
+    
+    	   = 3 * H * H + 3 * H + H * H + H + H + H + H * intermediate_size + intermediate_size + H * intermediate_size + H + H + H 
+    	   
+    	   = 9 * H + 4 * H * H + 2 * H * intermediate_size + intermediate_size
+    ```
 
 
 
-## 2.1 cuda_malloc 分配的量
+## 2.2 cuda_malloc 分配的量
 
 	为了便于查看，我们做如下约定
 	max_batch_tokens = B
@@ -216,12 +251,6 @@ layer a与layer b 计算方法相同
 
 
 - ```
-  
-  - wptr = gptr 
-  
-  	   = 3 * H * H + 3 * H + H * H + H + H + H + H * intermediate_size + intermediate_size + H * intermediate_size + H + H + H 
-  	   
-  	   = 9 * H + 4 * H * H + 2 * H * intermediate_size + intermediate_size
   
   - qkv_ptr= 3 * B * H
   
@@ -246,15 +275,49 @@ layer a与layer b 计算方法相同
 
 
 
-## 2.2 计算过程中可能存在的临时变量
+## 2.3 计算过程中可能存在的临时变量
 
 - 前向传播中
 
   - ![image-20211014212129197](README.assets/image-20211014212129197.png)
+
   - 每一个TransformerEncoderLayer可以划分为这些子层，在运算过程中会产生一些显存占用
+
+  - ```c++
+    对应于TransformerEncoderLayer.cpp中类构造函数：
+          
+          _qkv_linear(typename FeedForward<T>::Config(3 * hidden_size, hidden_size)),
+    		  
+          _attn_out_linear(typename FeedForward<T>::Config(hidden_size, hidden_size)),
+    		  
+          _attn_ln(typename Normalize_Layer<T>::Config(hidden_size, false),_max_batch_tokens),
+    			   
+          _ffn_ln(typename Normalize_Layer<T>::Config(hidden_size, false), _max_batch_tokens),
+    			  
+          _ff1(typename FeedForward<T>::Config(_intermediate_size, hidden_size)),
+          _ff2(typename FeedForward<T>::Config(hidden_size, _intermediate_size)),
+          
+          _softmax(typename Softmax<T>::Config(num_heads)),
+    	  
+          _attn_prob_dropout(typename Dropout<T>::Config(attn_prob_dropout_ratio),_max_batch_tokens * _heads * _max_seq_len),
+    						 
+          _attn_dropout(typename Dropout<T>::Config(hidden_output_dropout_ratio),_max_batch_tokens * _hidden_size),
+    					
+          _ffn_activation_dropout(typename Dropout<T>::Config(activation_dropout_ratio),_max_batch_tokens * _intermediate_size),
+    		  
+          _ffn_dropout(typename Dropout<T>::Config(hidden_output_dropout_ratio), _max_batch_tokens * _hidden_size),
+    				   
+          _attn_scores(typename StridedBatchGemm<T>::Config((T(1.0) / T(sqrt(_hidden_size / _heads))), T(0.0), CUBLAS_OP_T, CUBLAS_OP_N)),
+    		  
+          _attn_context(typename StridedBatchGemm<T>::Config(T(1.0), T(0.0), CUBLAS_OP_N, CUBLAS_OP_N))
+    	  {
+    			assert(_hidden_size % _heads == 0);
+    	  }
+    ```
+
   - 
 
-- 后向传播中
+- 向传播中
 
   - lightseq论文作者发现，transformer在训练和推理过程中，pytorch、tensorflow版代码gpu会频繁地释放和申请显存空间，导致gpu的显存利用率出现波动，如图：
 
@@ -266,11 +329,23 @@ layer a与layer b 计算方法相同
 
     
 
-    - 右边部分的图的每一行列出了一步中临时张量的内存占用情况。
+    - 右边部分的图的每一行列出了一步中**临时张量**的内存占用情况。
+    
     - 同一列中的张量重用同一内存块。
+    
     - 橙色张量和紫色张量的大小分别为BLH和BLLN。
+    
     - 虚线内存块中的张量不会在这个步骤中更新，而实心内存块中的张量会更新。
-    - 我们可以看到，只需要3BHL(前三个块)+ max{3BHL, BNL^2}(最后一个块)的内存字节.相反，如果不使用共享内存块策略，则总共需要9BLH+BL2N字节的内存。
+    
+    - 我们可以看到，只需要3BHL(前三个块)+ max{3BHL, BNL^2}(最后一个块)的内存字节.
+    
+    - 相反，如果不使用共享内存块策略，
+    
+      - **▽**Y, **▽**Z, **▽**K, **▽**Q, **▽**V, **▽**in 大小都是 B * L * H
+      - ▽S 大小是 3 * B * L * H
+      - ▽~K + ▽~Q + ▽~V 大小是 B * L^2 * N
+    
+      则总共需要**9 * B * L * H + B * L^2 * N**字节的临时内存。
 
 
 
@@ -283,15 +358,27 @@ layer a与layer b 计算方法相同
 
 
 
-- 可以共享一些显存，理由是
+- 可以共享一些显存，理由是：
+
+  - 某些中间结果仅在某些步骤内用，如果不需要了，就可以覆盖掉他
+  - 频繁地动态申请和释放显存会导致gpu开销变大。
 
   
 
 - 共享需要一些前提条件
 
-- 我们通过压缩内存来减少分配和释放，并且没有额外的成本，从而减少内存占用。
+  - 共享显存的变量之间无依赖关系
+  - 共享显存的量大小比较接近或相等
 
   
 
-- 为了避免临时内存的频繁分配，我们对训练集进行扫描并估计其容量的上界。因此，在训练开始前分配一次大小最大的临时内存，并对不同批次进行重复使用，在训练结束后释放。具体方式就是第二问提到的。
+- lightseq中的策略：
+
+  - 通过压缩内存来减少分配和释放，并且没有额外的成本，从而减少内存占用。
+  - 为了避免临时内存的频繁分配，对训练集进行扫描并估计其容量的上界。因此，在训练开始前分配一次大小最大的临时内存，并对不同批次进行重复使用，在训练结束后释放。具体方式就是第二问提到的。
+
+  
+
+
+[ref] LightSeq: Accelerated Training for Transformer-based Models on GPUs
 
