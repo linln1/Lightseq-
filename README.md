@@ -556,5 +556,5 @@ I = intermediate_size = 5*hidden_size = 2880
 
   
 
-[ref] LightSeq: Accelerated Training for Transformer-based Models on GPUs
+[ref] LightSeq: Accelerated Training for Transformer-based Models on GPUs, arXiv2021
 
