@@ -489,11 +489,11 @@ N = 9
 I = intermediate_size = 2*H = 2*1152 = 2304
 bool pre_or_postLayerNorm = true
 
-// 
+
 9 * H + 4 * H * H + 2 * H * I + I
-// 
+
 B* H  + B * N * L + 2 * B + B * H + B * I + 2 * B
-// 
+
 2 * ( 9 * B * L * H + B * L * L * N )
 
 对于26个 layer A 
@@ -514,11 +514,11 @@ intermediate_size = 5*hidden_size = 2880
 	
 加到一起，需要28.279999999999998 * sizeof(T) GB数据
 
-    half数据类型用16位来表示浮点数，就是2字节，sizeof(half)=2
-    需要56.56GB数据
+- half数据类型用16位来表示浮点数，就是2字节，sizeof(half)=2
+需要56.56GB数据
 
-	float数据类型32位，sizeof(float)=4
-	需要113.12GB数据
+- float数据类型32位，sizeof(float)=4
+需要113.12GB数据
 	
 ```
 
