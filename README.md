@@ -138,7 +138,7 @@
 
     
   
-- 接着来看，什么是中间值，就是指运行过程中会动态分配内存的量
+- 接着来看，什么是中间值，就是指运行过程构造函数会动态分配内存的量
 
   - **中间值**也就是
 
@@ -153,6 +153,7 @@
       nhead = H
       max_seq_len = L
       heads = N
+      intermediate_size = I
       ```
       
     - 具体来看，内存中分配空间大小如下
@@ -170,15 +171,15 @@
         
         _ff1_inp_ptr = B * H
         
-        _relu_inp_ptr = B * _intermediate_size
+        _relu_inp_ptr = B * I
         
-        _ff2_inp_ptr = B * _intermediate_size
+        _ff2_inp_ptr = B * I
         ```
         
       - 如果层与层之间要共享gpu内存，就需要给__shared_mem_ptr分配空间smem_size
       
         - ```
-          - smem_size = max(3 * B * H + B * _intermediate_size, 5 * B * H + std::max(3 * B * H,  B * N * L))
+          - smem_size = max(3 * B * H + B * I, 5 * B * H + std::max(3 * B * H,  B * N * L))
           ```
 
 ## 2. 分析任务中的52个Layer，运⾏起来⼤概会占⽤多少显存？
@@ -236,7 +237,7 @@ layer a与layer b 计算方法相同
     
     	   = 3 * H * H + 3 * H + H * H + H + H + H + H * intermediate_size + intermediate_size + H * intermediate_size + H + H + H 
     	   
-    	   = 9 * H + 4 * H * H + 2 * H * intermediate_size + intermediate_size
+    	   = 9 * H + 4 * H * H + 2 * H * I + I
     ```
 
 
@@ -248,6 +249,7 @@ layer a与layer b 计算方法相同
 	nhead = H
 	max_seq_len = L
 	heads = N
+	intermediate_size = I
 
 
 - ```
@@ -263,11 +265,11 @@ layer a与layer b 计算方法相同
   
   - ff1_inp_ptr = B * H
   
-  - relu_inp_ptr = B * intermediate_size
+  - relu_inp_ptr = B * I
   
-  - ff2_inp_ptr = B * intermediate_size
+  - ff2_inp_ptr = B * I
   
-  - smem_size = max(3 * B * H + B * _intermediate_size, 5 * B * H + std::max(3 * B * H,  B * N * L))
+  - smem_size = max(3 * B * H + B * I, 5 * B * H + std::max(3 * B * H,  B * N * L))
   其中smem_size是gpu中的全局共享内存，就是一些前后顺序上互相不依赖的tensor，可以共享显存。
   
   ```
@@ -471,11 +473,11 @@ layer a与layer b 计算方法相同
 
 ### 同理，正向传播中
 
-- 需要保存的就是，Y, Z, K, Q, V, in, S, ~K, ~Q, ~V 也需要**9 * B * L * H + B * L^2 * N**
+- 需要保存的就是，Y, Z, K, Q, V, in, S, ~K, ~Q, ~V 也需要**3BHL(前三个块)+ max{3BHL, BNL^2}**
 
 
 
-所以临时变量大小   **2 * ( **9 * B * L * H + B * L^2 * N )
+所以临时变量大小   6 * B * H * L+ 2 * max{3 * B * H * L, B * N * L * L}
 
 
 
@@ -490,16 +492,12 @@ I = intermediate_size = 2*H = 2*1152 = 2304
 bool pre_or_postLayerNorm = true
 
 
-9 * H + 4 * H * H + 2 * H * I + I
-
-B* H  + B * N * L + 2 * B + B * H + B * I + 2 * B
-
-2 * ( 9 * B * L * H + B * L * L * N )
+9 * H + 4 * H * H + 2 * H * I + I + 5 * B * H + 2 * B * N * L + 2 * B * I + max(3 * B * H + B * I,   5 * B * H + max(3 * B * H, B * N * L)) + B* H  + B * N * L + 2 * B + B * H + B * I + 2 * B + 6 * B * H * L+ 2 * max(3 * B * H * L, B * N * L * L)
 
 对于26个 layer A 
-	总共需要 26 * (10368 + 5308416 + 5308416 + 2304 + 1152 + 79524 + 1152 + 2304 + 2 + 183223296 + 140500000) = 8695360284
-	大概8.7 * 2^30
-    8.7 * sizeof(T) GB 数据
+	总共需要 38412163400
+	大概38.41 * 2^30
+    38.41 * sizeof(T) GB 数据
     
     
 同理，对于26个B
@@ -507,18 +505,18 @@ B = 1
 L = 4418 
 H = 576 
 N = 18 
-intermediate_size = 5*hidden_size = 2880
+I = intermediate_size = 5*hidden_size = 2880
 
-	19583625776 = 19.58 * 2^30
-	需要 19.58 * sizeof(T) GB 数据
+	18796160552 = 18.80 * 2^30
+	需要 18.80 * sizeof(T) GB 数据
 	
-加到一起，需要28.279999999999998 * sizeof(T) GB数据
+加到一起，需要57.21 * sizeof(T) GB数据
 
 - half数据类型用16位来表示浮点数，就是2字节，sizeof(half)=2
-需要56.56GB数据
+需要114.42GB数据
 
 - float数据类型32位，sizeof(float)=4
-需要113.12GB数据
+需要228.84GB数据
 	
 ```
 
