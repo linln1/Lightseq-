@@ -494,29 +494,29 @@ bool pre_or_postLayerNorm = true
 
 9 * H + 4 * H * H + 2 * H * I + I + 5 * B * H + 2 * B * N * L + 2 * B * I + max(3 * B * H + B * I,   5 * B * H + max(3 * B * H, B * N * L)) + B* H  + B * N * L + 2 * B + B * H + B * I + 2 * B + 6 * B * H * L+ 2 * max(3 * B * H * L, B * N * L * L)
 
-对于26个 layer A 
+对于18个 layer A 
 	总共需要 38412163400
-	大概38.41 * 2^30
-    38.41 * sizeof(T) GB 数据
+	大概26.59 * 2^30
+    26.59 * sizeof(T) GB 数据
     
     
-同理，对于26个B
+同理，对于34个B
 B = 1 
 L = 4418 
 H = 576 
 N = 18 
 I = intermediate_size = 5*hidden_size = 2880
 
-	18796160552 = 18.80 * 2^30
-	需要 18.80 * sizeof(T) GB 数据
+	24.58 * 2^30
+	需要 24.58 * sizeof(T) GB 数据
 	
-加到一起，需要57.21 * sizeof(T) GB数据
+加到一起，需要51.17 * sizeof(T) GB数据
 
 - half数据类型用16位来表示浮点数，就是2字节，sizeof(half)=2
-需要114.42GB数据
+需要102.34GB数据
 
 - float数据类型32位，sizeof(float)=4
-需要228.84GB数据
+需要204.68GB数据
 	
 ```
 
@@ -555,6 +555,128 @@ I = intermediate_size = 5*hidden_size = 2880
   - 为了避免临时内存的频繁分配，对训练集进行扫描并估计其容量的上界。因此，在训练开始前分配一次大小最大的临时内存，并对不同批次进行重复使用，在训练结束后释放。具体方式就是第二问提到的。
 
   
+  
+  
+  
+  ```python
+  import torch
+  from lightseq.training.ops.pytorch.transformer_encoder_layer import LSTransformerEncoderLayer
+  
+  
+  def train(model, inputs, masks):
+  
+      inputs = inputs.to(device="cuda:0")
+      masks = masks.to(device="cuda:0")
+      model.to(device="cuda:0")
+      model.train()
+      opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+  
+      for epoch in range(1):
+          opt.zero_grad()
+          outputs = model(inputs, masks)
+          loss = torch.square(outputs).mean()
+          loss.backward()
+          opt.step()
+          if epoch % 200 == 0:
+              print("epoch {:>3d}: loss = {:>5.3f}".format(epoch, loss))
+  
+  if __name__ == "__main__":
+  
+  
+      config = LSTransformerEncoderLayer.get_config(
+          max_batch_tokens=8836,
+          max_seq_len=8836,
+          hidden_size=1152,
+          intermediate_size=1152*2,
+          nhead=9,
+          attn_prob_dropout_ratio=0,
+          activation_dropout_ratio=0.1,
+          hidden_dropout_ratio=0,
+          pre_layer_norm=True,
+          fp16=False,
+          local_rank=0
+      )
+  
+  
+      bsz, sl = 10, 80
+      inputs = torch.randn(bsz, sl, config.hidden_size)
+      masks = torch.zeros(bsz, sl)
+  
+  
+      model = LSTransformerEncoderLayer(config)
+      train(model, inputs, masks)
+  
+      total_params = sum(p.numel() for p in model.parameters())
+      print(f'{total_params:,} total parameters.')
+      total_trainable_params = sum(
+          p.numel() for p in model.parameters() if p.requires_grad)
+      print(f'{total_trainable_params:,} training parameters.')
+  
+  
+  ```
+  
+  
+  
+  
+  
+  
+  
+  ## 4.优化对精度的影响？
+  
+   ![image-20211016201747618](README.assets/image-20211016201747618.png)
+  
+- 为了防止x不同维度之间的过度差异导致数值不稳定性。
+
+- 找到x最小值，然后让所有值都减去这个最小值
+
+- 再进行softmax，这个和原本softmax相比不一样
+
+虽然计算公式发生了一定变化，但是注意到，softmax是为了找到每个类别的样本在整体中所占的比例，而加上了以e为底的指数函数，可以让exp(x_min - x_min)仍有可能被预测到
+
+**举个例子，通过若干层的计算，最后得到的某个训练样本的向量的分数是[ 2, 3, 4 ],
+那么经过softmax函数作用后概率分别就是= [0.09003057 0.24472847 0.66524096]**
+
+如果采用上述的改进算法，得到的结果就是[2-2,3-2, 4-2] = [0, 1, 2] 
+
+softmax([0,1,2]) = [0.09003057 0.24472847 0.66524096]
+
+相对误差   =   [0.0000000e+00 0.0000000e+00 1.6689036e-16]
+
+相对误差非常小
+
+
+
+```
+import numpy as np
+
+
+def softmax(z):
+    z = np.array(z)
+    z = z - max(z)
+    z = np.exp(z)
+    softmax_z = z / np.sum(z)
+    return softmax_z
+
+if __name__ == "__main__":
+    x = [0,1,2]
+    y = [2,3,4]
+    softy = softmax(y)
+    print(softy)
+    diff = softmax(x) - softy
+
+    print(diff)
+
+    for i in range(len(diff)):
+        diff[i] = float(diff[i]) / float(softy[i])
+
+    print(diff)
+```
+
+
+
+
+
+
 
 [ref] LightSeq: Accelerated Training for Transformer-based Models on GPUs, arXiv2021
 
